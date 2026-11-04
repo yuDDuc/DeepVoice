@@ -1,0 +1,13 @@
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+pydantic-settings==2.6.1
+pymongo==4.10.1
+python-multipart==0.0.17
+psutil==6.1.0
+PyJWT==2.10.1
+segno==1.6.1
+email-validator==2.2.0
+transformers>=4.45.0
+torch>=2.4.0
+soundfile>=0.12.1
+numpy>=2.0.0
