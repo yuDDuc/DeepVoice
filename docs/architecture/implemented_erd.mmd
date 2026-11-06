@@ -1,0 +1,67 @@
+%% Schema implemented in 0.1; segments and wallet balance are embedded.
+erDiagram
+  USER ||--o{ REFRESH : owns
+  USER ||--o{ TICKET : requests
+  USER ||--o{ SESSION : owns
+  USER ||--o{ ORDER : creates
+  USER ||--o{ LEDGER : receives
+  USER ||--o{ AUDIT : triggers
+  ORDER ||--o| LEDGER : grants_once
+  ORDER ||--o{ EVENT : deduplicates
+  ORDER ||--o| OUTBOX : schedules
+  USER {
+    string id PK
+    string email UK
+    string password_hash
+    string role
+    int credits
+    boolean consent_history
+    boolean consent_cloud
+  }
+  REFRESH {
+    string id PK
+    string user_id FK
+    datetime expires_at
+    boolean revoked
+  }
+  TICKET {
+    string id PK
+    string user_id FK
+    datetime expires_at
+  }
+  SESSION {
+    string id PK
+    string user_id FK
+    string direction
+    array segments
+    datetime expires_at
+  }
+  ORDER {
+    string id PK
+    string user_id FK
+    string idempotency_key
+    int order_code UK
+    int amount_vnd
+    int credits
+    string status
+    datetime expires_at
+  }
+  LEDGER {
+    string id PK
+    string user_id FK
+    int delta
+  }
+  EVENT {
+    string id PK
+    string order_id FK
+  }
+  OUTBOX {
+    string id PK
+    string type
+    string state
+  }
+  AUDIT {
+    string id PK
+    string actor_id FK
+    string action
+  }

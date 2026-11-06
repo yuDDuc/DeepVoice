@@ -1,0 +1,7 @@
+# PROMPT 06 — Production-oriented auth, RBAC and Mongo persistence
+
+Implement users, hashed passwords (Argon2id), signup/signin/refresh/signout/session revocation, optional email verification, forgot/reset password via configured mail adapter (mock in dev); access token in secure HttpOnly cookie with CSRF strategy and SameSite, refresh rotation/reuse detection. Short-term WS ticket bound to user/session. Support roles `user|admin`, resource scoping and admin audit log; reject unauthorized model registry updates and other-user session access. Rate limit login, token issue and WebSockets; secure CORS and secret redaction.
+
+Implement Mongo logical entities from ERD: users, sessions, consents, speaker_profiles, model_registry, translation_sessions, transcript_segments, metrics and audit. Indexes: unique email, unique external provider events/idempotency where applicable, TTL for ephemeral sessions/tokens/metrics, `user_id + created_at` for history. Use encrypted or protected storage strategy for optional raw audio; default no long-term audio retention. Provide delete-my-data API including associated speaker embeddings within documented retention/legal constraints.
+
+Build DB transaction wrapper and unit-test with the dev replica set, explain non-HA single-node mode; keep external calls out of transactions. Testing with two users, admin/user scopes, expired cookie, stolen/reused refresh, CSRF, WS access, consent disabled, deletion and transaction rollback. Backend integration docs and frontend typed auth contracts. STOP.

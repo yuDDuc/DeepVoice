@@ -1,0 +1,5 @@
+# docker compose -f compose.yaml -f compose.ai.yaml up --build
+services:
+  worker:
+    build:
+      args: {INSTALL_AI: "true"}

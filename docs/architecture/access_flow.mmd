@@ -1,0 +1,21 @@
+flowchart LR
+  Guest[Khach chua dang nhap] --> Public[Landing / Auth APIs]
+  User[User da dang nhap] --> FE[Next.js Browser]
+  Admin[Admin da dang nhap] --> FE
+  FE -->|HTTPS cookie + CSRF| API[FastAPI Gateway]
+  FE <-->|WS ticket + PCM + result| WS[Streaming WebSocket]
+  Public --> API
+  API -->|RBAC + session| DB[(MongoDB Replica Set)]
+  API --> Queue[(Redis Job/Progress)]
+  WS --> Worker[Inference Worker]
+  Worker --> DB
+  Worker --> Queue
+  Worker -->|cache model revision| HFHub[Hugging Face Hub]
+  Worker -.->|user consent + enabled| HFRemote[HF Inference Remote]
+  API -->|create payment order| Payment[payOS / SePay / PSP]
+  Payment -->|verified signed HTTPS webhook| Webhook[Webhook Ingress]
+  Webhook -->|signature + dedupe| API
+  Admin -.->|admin-only warmup/reload| Worker
+  API --> Mon[Metrics Endpoint]
+  WS --> Mon
+  User -.->|only owned sessions| Mon

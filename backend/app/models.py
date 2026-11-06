@@ -1,245 +1,382 @@
-from dataclasses import dataclass
+"""Lazy, role-isolated adapters. No model code is trusted/executed from user paths."""
+
+import base64
 import io
-import json
-import os
-import tempfile
-import logging
 import re
 import time
+import wave
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+import numpy as np
 
-# Use an app-owned Windows cache and disable symlink-based snapshots.
-_APP_ROOT = Path(__file__).resolve().parents[2]
-_HF_CACHE = _APP_ROOT / '.model-cache'
-os.environ.setdefault('HF_HOME', str(_HF_CACHE))
-os.environ.setdefault('HF_HUB_CACHE', str(_HF_CACHE / 'hub'))
-os.environ.setdefault('HF_HUB_DISABLE_SYMLINKS', '1')
+from .config import ROLES
 
-@dataclass
-class Result:
-    text: str
-    name: str
-    provider: str
-    device: str
 
-class MockASR:
-    def transcribe(self, audio, name, device):
-        return Result('Đây là bản ghi âm mẫu từ DeepVoice.', name, 'mock', device)
+class ModelError(ValueError):
+    pass
 
-class HuggingFaceASR:
-    def __init__(self, model_id, device, target_sample_rate=16000, language='en', task='transcribe', chunk_seconds=25, max_new_tokens=448):
-        try:
-            import torch
-            from transformers import AutoProcessor, Wav2Vec2Processor, WhisperFeatureExtractor, WhisperTokenizerFast, WhisperProcessor, AutoModelForCTC, AutoModelForSpeechSeq2Seq
-            self.torch = torch
-            self.target_sample_rate = target_sample_rate
-            self.language = language
-            self.task = task
-            self.chunk_samples = max(1, int(chunk_seconds)) * target_sample_rate
-            self.max_new_tokens = min(440, max(16, int(max_new_tokens)))
-            self.is_whisper = 'whisper' in model_id.lower()
-            if self.is_whisper:
-                # Normalize malformed custom tokenizer metadata in a temp copy. Never
-                # edit the user's Hugging Face cache or the model repository.
-                from huggingface_hub import snapshot_download
-                snapshot = Path(snapshot_download(
-                    model_id,
-                    cache_dir=str(_HF_CACHE / 'hub'),
-                    local_dir=str(_HF_CACHE / 'models' / model_id.replace('/', '--')),
-                    local_dir_use_symlinks=False,
-                ))
-                metadata_path = snapshot / 'tokenizer_config.json'
-                metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
-                if isinstance(metadata.get('extra_special_tokens'), list):
-                    metadata.pop('extra_special_tokens', None)
-                    metadata.pop('additional_special_tokens', None)
-                    temp_dir = Path(tempfile.mkdtemp(prefix='deepvoice-whisper-'))
-                    for source in snapshot.iterdir():
-                        if source.is_file():
-                            target = temp_dir / source.name
-                            if source.name == 'tokenizer_config.json':
-                                target.write_text(json.dumps(metadata, ensure_ascii=False), encoding='utf-8')
-                            else:
-                                target.write_bytes(source.read_bytes())
-                    model_source = str(temp_dir)
-                else:
-                    model_source = model_id
-                feature_extractor = WhisperFeatureExtractor.from_pretrained(model_source)
-                tokenizer = WhisperTokenizerFast.from_pretrained(model_source, language=language, task=task)
-                self.processor = WhisperProcessor(feature_extractor=feature_extractor, tokenizer=tokenizer)
-            else:
-                self.processor = Wav2Vec2Processor.from_pretrained(model_id)
-            model_type = AutoModelForSpeechSeq2Seq if self.is_whisper else AutoModelForCTC
-            self.model = model_type.from_pretrained(model_source if self.is_whisper else model_id)
-            self.device = 'cuda' if device == 'cuda' or (device == 'auto' and torch.cuda.is_available()) else 'cpu'
-            self.model.to(self.device)
-            if self.device == 'cpu': self.model.float()
-            self.model.eval()
-        except Exception as exc:
-            raise RuntimeError(f'Không thể load Hugging Face ASR model {model_id}: {exc}') from exc
 
-    def transcribe(self, audio, name, device):
-        import soundfile as sf
-        import numpy as np
-        samples, sample_rate = sf.read(io.BytesIO(audio), dtype='float32', always_2d=False)
-        if getattr(samples, 'ndim', 1) > 1: samples = np.mean(samples, axis=1)
-        if sample_rate != self.target_sample_rate:
-            source_positions = np.arange(len(samples), dtype=np.float32)
-            target_length = round(len(samples) * self.target_sample_rate / sample_rate)
-            target_positions = np.linspace(0, len(samples) - 1, target_length)
-            samples = np.interp(target_positions, source_positions, samples).astype('float32')
-            sample_rate = self.target_sample_rate
-        if self.is_whisper:
-            chunks = [samples[i:i + self.chunk_samples] for i in range(0, len(samples), self.chunk_samples)]
-            transcripts = []
-            for chunk in chunks:
-                if len(chunk) == 0: continue
-                inputs = self.processor(chunk, sampling_rate=sample_rate, return_tensors='pt', padding='max_length', max_length=30 * sample_rate, truncation=True)
-                model_dtype = next(self.model.parameters()).dtype
-                features = inputs['input_features'].to(self.device, dtype=model_dtype)
-                with self.torch.inference_mode():
-                    prompt_ids = self.processor.tokenizer.get_decoder_prompt_ids(language=self.language, task=self.task)
-                    prompt_length = len(prompt_ids) + 1  # include decoder start token
-                    token_budget = min(self.max_new_tokens, max(1, 448 - prompt_length))
-                    generated = self.model.generate(features, max_new_tokens=token_budget, task=self.task, language=self.language)
-                transcripts.append(self.processor.batch_decode(generated, skip_special_tokens=True)[0].strip())
-            text = ' '.join(part for part in transcripts if part)
-        else:
-            inputs = self.processor(samples, sampling_rate=sample_rate, return_tensors='pt', padding=True)
-            model_dtype = next(self.model.parameters()).dtype
-            inputs = {key: (value.to(self.device, dtype=model_dtype) if value.is_floating_point() else value.to(self.device)) for key, value in inputs.items()}
-            with self.torch.inference_mode():
-                logits = self.model(**inputs).logits
-                text = self.processor.batch_decode(self.torch.argmax(logits, dim=-1))[0].strip()
-        return Result(text, name, 'huggingface', self.device)
-
-class MockTranslation:
-    def translate(self, text, name, device):
-        return Result(f'[Bản dịch mẫu] {text}', name, 'mock', device)
-
-def normalize_translation_input(text):
-    text = re.sub(r'\s+', ' ', (text or '').strip())
-    if not text:
-        return ''
-    text = re.sub(r'\bi\b', 'I', text, flags=re.IGNORECASE)
-    return text
-
-def chunk_text(text, max_words=25):
-    text = normalize_translation_input(text)
-    if not text:
-        return []
-    max_words = max(1, int(max_words))
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-    chunks = []
-    for sentence in sentences:
-        words = sentence.split()
-        while words:
-            part = words[:max_words]
-            words = words[max_words:]
-            chunk = ' '.join(part)
-            if chunk:
-                chunk = chunk[0].upper() + chunk[1:]
-                chunks.append(chunk)
-    return chunks
-
-def remove_repetitions(text):
-    text = re.sub(r'<[^>]*>', ' ', text or '')
-    text = text.replace('/', '')
-    pattern = re.compile(r'(?i)\b((?:[\wÀ-ỹ]+\s+){0,3}[\wÀ-ỹ]+)(?:\s+\1){2,}\b')
-    previous = None
-    while previous != text:
-        previous = text
-        text = pattern.sub(r'\1', text)
-        text = re.sub(r'\b([\wÀ-ỹ]+)(?:\s+\1){2,}\b', r'\1', text, flags=re.IGNORECASE)
-    return re.sub(r'\s+', ' ', text).strip()
-
-class HuggingFaceTranslation:
-    def __init__(self, model_id, device, settings=None):
-        try:
-            import torch
-            from huggingface_hub import snapshot_download
-            from pathlib import Path
-            from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-            self.torch = torch
-            snapshot = Path(snapshot_download(
-                model_id,
-                cache_dir=str(_HF_CACHE / 'hub'),
-                local_dir=str(_HF_CACHE / 'models' / model_id.replace('/', '--')),
-                local_dir_use_symlinks=False,
-            ))
-            self.tokenizer = AutoTokenizer.from_pretrained(str(snapshot), local_files_only=True)
-            self.model = AutoModelForSeq2SeqLM.from_pretrained(str(snapshot), local_files_only=True)
-            self.device = 'cuda' if device == 'cuda' or (device == 'auto' and torch.cuda.is_available()) else 'cpu'
-            self.model.to(self.device)
-            if self.device == 'cpu': self.model.float()
-            self.model.eval()
-            self.model_id = model_id
-            self.settings = settings
-            self.punctuator = None
-            if settings and settings.mt_restore_punctuation:
-                from transformers import pipeline
-                self.punctuator = pipeline('text2text-generation', model='oliverguhr/fullstop-punctuation-multilang-large', device=0 if self.device == 'cuda' else -1)
-        except Exception as exc:
-            raise RuntimeError(f'Không thể load Hugging Face Translation model {model_id}: {exc}') from exc
-
-    def translate(self, text, name, device):
-        if not (text or '').strip():
-            return Result('', name, 'huggingface', self.device)
-        settings = self.settings
-        if self.punctuator:
-            text = self.punctuator(text, max_new_tokens=128)[0]['generated_text']
-        chunks = chunk_text(text, settings.mt_max_chunk_words)
-        outputs = []
-        started = time.perf_counter()
-        for offset in range(0, len(chunks), settings.mt_batch_size):
-            batch = chunks[offset:offset + settings.mt_batch_size]
-            inputs_text = batch
-            if 'nllb-200' in self.model_id.lower():
-                self.tokenizer.src_lang = 'eng_Latn'
-            if 'envit5-translation' in self.model_id.lower():
-                inputs_text = [f'en: {part}' for part in batch]
-            inputs = self.tokenizer(inputs_text, return_tensors='pt', padding=True, truncation=True, max_length=128)
-            model_dtype = next(self.model.parameters()).dtype
-            inputs = {key: (value.to(self.device, dtype=model_dtype) if value.is_floating_point() else value.to(self.device)) for key, value in inputs.items()}
-            generation = dict(num_beams=settings.mt_num_beams, no_repeat_ngram_size=settings.mt_no_repeat_ngram, repetition_penalty=settings.mt_repetition_penalty, max_new_tokens=settings.mt_max_new_tokens, early_stopping=True)
-            if 'nllb-200' in self.model_id.lower():
-                generation['forced_bos_token_id'] = self.tokenizer.convert_tokens_to_ids('vie_Latn')
-            with self.torch.inference_mode():
-                output = self.model.generate(**inputs, **generation)
-            outputs.extend(self.tokenizer.batch_decode(output, skip_special_tokens=True))
-        cleaned = []
-        for output in outputs:
-            if 'envit5-translation' in self.model_id.lower():
-                output = re.sub(r'^\s*vi:\s*', '', output, flags=re.IGNORECASE)
-            result = remove_repetitions(output)
-            if result != output.strip():
-                logger.warning('MT repetition detected and reduced in chunk')
-            cleaned.append(result)
-        translated = ' '.join(part for part in cleaned if part)
-        logger.info('MT completed: chunks=%d batch_size=%d elapsed_ms=%.1f', len(chunks), settings.mt_batch_size, (time.perf_counter() - started) * 1000)
-        return Result(translated, self.model_id, 'huggingface', self.device)
-
-class ModelRegistry:
+class Registry:
     def __init__(self, settings):
         self.settings = settings
-        if settings.asr_provider.lower() == 'huggingface':
-            self.asr = HuggingFaceASR(settings.asr_model_id or settings.asr_model_name, settings.asr_device, settings.asr_sample_rate, settings.asr_language, settings.asr_task, settings.asr_chunk_seconds, settings.asr_max_new_tokens)
-        else:
-            self.asr = MockASR()
-        if settings.mt_provider.lower() == 'huggingface':
-            self.mt = HuggingFaceTranslation(settings.mt_model_id or settings.mt_model_name, settings.mt_device, settings)
-        else:
-            self.mt = MockTranslation()
+        self.loaded = {}
+        self.states = {r: {"status": "cold", "error": None} for r in ROLES}
 
-    def infer(self, audio):
-        asr_device = self.settings.asr_device if self.settings.asr_device != 'auto' else 'cpu'
-        mt_device = self.settings.mt_device if self.settings.mt_device != 'auto' else 'cpu'
-        asr_started = time.perf_counter()
-        asr = self.asr.transcribe(audio, self.settings.asr_model_name, asr_device)
-        logger.info('ASR completed: elapsed_ms=%.1f', (time.perf_counter() - asr_started) * 1000)
-        mt_started = time.perf_counter()
-        mt = self.mt.translate(asr.text, self.settings.mt_model_name, mt_device)
-        logger.info('MT request completed: elapsed_ms=%.1f', (time.perf_counter() - mt_started) * 1000)
-        return asr, mt
+    def preflight(self, role):
+        spec = self.settings.spec(role)
+        if spec.source == "mock":
+            return {"ok": True, "note": "Mock: dữ liệu minh họa, không phải model AI."}
+        if spec.source == "hf_remote":
+            if self.settings.hf_offline:
+                raise ModelError("HF_OFFLINE đang bật; không gọi HF Remote.")
+            if not self.settings.hf_token:
+                raise ModelError(
+                    "HF Remote cần HF_TOKEN phía server và model được provider hỗ trợ."
+                )
+            if role.startswith("TTS"):
+                raise ModelError(
+                    "HF Remote TTS chưa triển khai; dùng local/Hub transformers_tts."
+                )
+        else:
+            if spec.source == "local":
+                root = Path(self.settings.local_models_root).resolve()
+                path = (root / spec.local_path).resolve()
+                if not path.is_relative_to(root) or not path.is_dir():
+                    raise ModelError(
+                        "LOCAL_PATH phải là thư mục có sẵn nằm trong LOCAL_MODELS_ROOT."
+                    )
+                if not (path / "config.json").is_file():
+                    raise ModelError(
+                        "Thiếu config.json: export bằng save_pretrained(); checkpoint .pt đơn lẻ cần adapter riêng."
+                    )
+            if spec.device == "cuda":
+                try:
+                    import torch
+
+                    if not torch.cuda.is_available():
+                        raise ModelError(
+                            "CUDA không khả dụng; chọn DEVICE=cpu hoặc cài image GPU."
+                        )
+                except ImportError as exc:
+                    raise ModelError("Chưa cài requirements-ai.txt.") from exc
+        expected = (
+            "transformers_asr"
+            if role.startswith("ASR")
+            else "seq2seq"
+            if role.startswith("MT")
+            else "transformers_tts"
+        )
+        if spec.adapter != expected:
+            raise ModelError(f"{role} cần ADAPTER={expected}.")
+        # This adapter accepts one waveform (N,) or token ids (B,L). Declaration cannot resize architecture.
+        rank = 1 if role.startswith("ASR") else 2
+        if role.startswith(("ASR", "MT")) and len(spec.input_shape) != rank:
+            raise ModelError(f"INPUT_SHAPE cần rank {rank} cho adapter {spec.adapter}.")
+        return {
+            "ok": True,
+            "note": "Cấu hình hợp lệ; khả năng load model chỉ xác nhận sau warmup/inference.",
+        }
+
+    def describe(self):
+        result = []
+        for role in ROLES:
+            spec = self.settings.spec(role)
+            public = spec.model_dump(exclude={"local_path", "adapter_kwargs_json"})
+            try:
+                check = self.preflight(role)
+            except (ValueError, ImportError) as e:
+                check = {"ok": False, "note": str(e)}
+            result.append(
+                {
+                    **public,
+                    **self.states[role],
+                    "preflight": check,
+                    "execution": "remote" if spec.source == "hf_remote" else "local",
+                    "streaming": "buffered_utterance"
+                    if role.startswith("ASR")
+                    else "batch",
+                }
+            )
+        return result
+
+    def load(self, role):
+        self.preflight(role)
+        if role in self.loaded:
+            return self.loaded[role]
+        spec = self.settings.spec(role)
+        self.states[role] = {"status": "loading", "error": None}
+        try:
+            if spec.source == "mock":
+                obj = None
+            elif spec.source == "hf_remote":
+                from huggingface_hub import InferenceClient
+
+                obj = InferenceClient(
+                    model=spec.model_id,
+                    token=self.settings.hf_token,
+                    provider=self.settings.hf_remote_provider,
+                    timeout=self.settings.job_timeout_s,
+                )
+            else:
+                import torch
+                from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, pipeline
+
+                if spec.source == "local":
+                    target = str(
+                        (
+                            Path(self.settings.local_models_root) / spec.local_path
+                        ).resolve()
+                    )
+                else:
+                    from huggingface_hub import snapshot_download
+
+                    self.states[role]["status"] = "downloading"
+                    target = snapshot_download(
+                        repo_id=spec.model_id,
+                        revision=spec.model_revision or None,
+                        token=self.settings.hf_token or None,
+                        cache_dir=self.settings.hf_cache_dir,
+                        local_files_only=self.settings.hf_offline,
+                        allow_patterns=[
+                            "*.json",
+                            "*.safetensors",
+                            "pytorch_model.bin",
+                            "*.model",
+                            "*.txt",
+                            "*.tiktoken",
+                            "tokenizer*",
+                            "vocab*",
+                            "merges*",
+                            "*.spm",
+                        ],
+                    )
+                device = (
+                    "cuda"
+                    if spec.device == "auto" and torch.cuda.is_available()
+                    else "cpu"
+                    if spec.device == "auto"
+                    else spec.device
+                )
+                dtype = getattr(torch, spec.dtype)
+                opts = {"trust_remote_code": False, "local_files_only": True}
+                if role.startswith("MT"):
+                    tokenizer = AutoTokenizer.from_pretrained(target, **opts)
+                    has_safetensors = (Path(target) / "model.safetensors").is_file()
+                    model = (
+                        AutoModelForSeq2SeqLM.from_pretrained(
+                            target,
+                            torch_dtype=dtype,
+                            use_safetensors=has_safetensors,
+                            weights_only=True,
+                            **opts,
+                        )
+                        .to(device)
+                        .eval()
+                    )
+                    obj = (tokenizer, model, device)
+                else:
+                    task = (
+                        "automatic-speech-recognition"
+                        if role.startswith("ASR")
+                        else "text-to-audio"
+                    )
+                    tokenizer = (
+                        AutoTokenizer.from_pretrained(
+                            target, extra_special_tokens={}, **opts
+                        )
+                        if role.startswith("ASR")
+                        else None
+                    )
+                    obj = pipeline(
+                        task,
+                        model=target,
+                        tokenizer=tokenizer,
+                        device=device,
+                        torch_dtype=dtype,
+                        trust_remote_code=False,
+                        model_kwargs={
+                            "local_files_only": True,
+                            "use_safetensors": True,
+                        },
+                    )
+            self.loaded[role] = obj
+            self.states[role] = {"status": "ready", "error": None}
+            return obj
+        except Exception as exc:
+            # Deliberately avoid remote exception URLs/headers in public diagnostics.
+            self.states[role] = {"status": "error", "error": type(exc).__name__}
+            raise ModelError(
+                f"Không load được {role} ({type(exc).__name__}). Kiểm tra format, revision, cache, quyền HF và RAM/VRAM; model cần safetensors hoặc PyTorch weights_only tương thích."
+            ) from exc
+
+    def run(self, role, value):
+        spec = self.settings.spec(role)
+        obj = self.load(role)
+        if spec.source == "mock":
+            if role.startswith("ASR"):
+                return (
+                    "Hello, this is a demonstration."
+                    if role == "ASR_EN"
+                    else "Xin chào, đây là bản minh họa."
+                )
+            if role.startswith("MT"):
+                known = {
+                    "hello": "Xin chào",
+                    "thank you": "Cảm ơn",
+                    "xin chào": "Hello",
+                    "cảm ơn": "Thank you",
+                }
+                return known.get(value.lower().strip(" .!"), f"[MOCK {role}] {value}")
+            return None
+        if spec.source == "hf_remote":
+            if role.startswith("MT"):
+                kwargs = spec.adapter_kwargs_json
+                return obj.translation(
+                    value,
+                    src_lang=kwargs.get("src_lang"),
+                    tgt_lang=kwargs.get("tgt_lang"),
+                ).translation_text
+            audio = np.asarray(value, dtype=np.float32)
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as f:
+                f.setnchannels(1)
+                f.setsampwidth(2)
+                f.setframerate(spec.input_sample_rate)
+                f.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
+            return obj.automatic_speech_recognition(buf.getvalue()).text
+        if role.startswith("ASR"):
+            audio = np.asarray(value, dtype=np.float32)
+            if audio.ndim != len(spec.input_shape) or any(
+                d != -1 and d != actual
+                for d, actual in zip(spec.input_shape, audio.shape)
+            ):
+                raise ModelError("Audio shape không khớp INPUT_SHAPE khai báo.")
+            kwargs = {
+                k: v
+                for k, v in spec.adapter_kwargs_json.items()
+                if k in ("language", "task", "max_new_tokens")
+            }
+            return obj(
+                {"raw": audio, "sampling_rate": spec.input_sample_rate},
+                generate_kwargs=kwargs,
+            )["text"]
+        if role.startswith("MT"):
+            import torch
+
+            tokenizer, model, device = obj
+            tokens = tokenizer(
+                spec.prefix + value, return_tensors="pt", truncation=False
+            ).to(device)
+            actual = list(tokens["input_ids"].shape)
+            if any(d != -1 and d != a for d, a in zip(spec.input_shape, actual)):
+                raise ModelError(
+                    "Token input shape không khớp khai báo. Dùng [-1,-1] cho độ dài động."
+                )
+            kwargs = {
+                k: v
+                for k, v in spec.adapter_kwargs_json.items()
+                if k in ("max_new_tokens", "num_beams")
+            }
+            kwargs.setdefault("max_new_tokens", self.settings.model_max_new_tokens)
+            with torch.inference_mode():
+                output = model.generate(**tokens, **kwargs)
+            if len(spec.output_shape) != output.ndim or any(
+                d != -1 and d != a for d, a in zip(spec.output_shape, output.shape)
+            ):
+                raise ModelError(
+                    "Token output shape không khớp OUTPUT_SHAPE. MT dùng [-1,-1]."
+                )
+            return tokenizer.decode(output[0], skip_special_tokens=True)
+        out = obj(value)
+        audio = np.asarray(out["audio"], dtype=np.float32).reshape(-1)
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as f:
+            f.setnchannels(1)
+            f.setsampwidth(2)
+            f.setframerate(out["sampling_rate"])
+            f.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
+        return {
+            "mime": "audio/wav",
+            "base64": base64.b64encode(buf.getvalue()).decode(),
+        }
+
+
+def verify(source, target):
+    """Heuristics flag risk; passing is not semantic correctness certification."""
+    warnings = []
+    numbers = lambda s: re.findall(r"\d+(?:[.,]\d+)*", s)
+    if sorted(numbers(source)) != sorted(numbers(target)):
+        warnings.append("Số liệu khác nhau; cần kiểm tra.")
+    neg_en = bool(
+        re.search(
+            r"\b(?:not|never|no|cannot|can't|don't|doesn't|won't)\b", source, re.IGNORECASE
+        )
+    )
+    neg_vi = bool(re.search(r"\b(?:không|chưa|đừng|chẳng)\b", source, re.IGNORECASE))
+    if (neg_en or neg_vi) and not re.search(
+        r"\b(?:not|never|no|cannot|không|chưa|đừng|chẳng)\b", target, re.IGNORECASE
+    ):
+        warnings.append("Có thể mất ý phủ định.")
+    if not target.strip():
+        warnings.append("Bản dịch trống.")
+    return {
+        "state": "needs_review" if warnings else "rule_checked",
+        "warnings": warnings,
+        "scope": "number_negation_heuristics_only",
+        "semantic_verified": False,
+    }
+
+
+def infer(settings, registry, job):
+    timings = {}
+    started = time.perf_counter()
+    direction = job["direction"]
+    asr = "ASR_EN" if direction == "en-vi" else "ASR_VI"
+    mt = "MT_EN_VI" if direction == "en-vi" else "MT_VI_EN"
+    text = job.get("text")
+    if text is None:
+        audio = (
+            np.frombuffer(base64.b64decode(job["audio"]), dtype="<i2").astype(
+                np.float32
+            )
+            / 32768
+        )
+        rate = job["sample_rate"]
+        target_rate = settings.spec(asr).input_sample_rate
+        if rate != target_rate:
+            duration = len(audio) / rate
+            audio = np.interp(
+                np.arange(int(duration * target_rate)) / target_rate,
+                np.arange(len(audio)) / rate,
+                audio,
+            ).astype(np.float32)
+        t = time.perf_counter()
+        text = registry.run(asr, audio)
+        timings["asr_ms"] = (time.perf_counter() - t) * 1000
+    t = time.perf_counter()
+    target = registry.run(mt, text)
+    timings["mt_ms"] = (time.perf_counter() - t) * 1000
+    t = time.perf_counter()
+    check = verify(text, target)
+    timings["verify_ms"] = (time.perf_counter() - t) * 1000
+    speech = None
+    tts_role = "TTS_VI" if direction == "en-vi" else "TTS_EN"
+    if job.get("tts") and not check["warnings"]:
+        t = time.perf_counter()
+        speech = registry.run(tts_role, target)
+        timings["tts_ms"] = (time.perf_counter() - t) * 1000
+    timings["total_ms"] = (time.perf_counter() - started) * 1000
+    duration = job.get("duration_s")
+    used = [mt] + ([asr] if "audio" in job else [])
+    return {
+        "source_text": text,
+        "target_text": target,
+        "verification": check,
+        "state": "needs_review" if check["warnings"] else "confirmed",
+        "timings": {k: round(v, 2) for k, v in timings.items()},
+        "rtf": timings["total_ms"] / 1000 / duration if duration else None,
+        "audio": speech,
+        "mock": any(settings.spec(r).source == "mock" for r in used),
+        "models": used,
+        "direction": direction,
+    }

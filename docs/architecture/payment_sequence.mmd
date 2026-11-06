@@ -1,0 +1,25 @@
+sequenceDiagram
+  autonumber
+  participant U as Logged-in User
+  participant API as FastAPI Billing
+  participant DB as MongoDB Replica Set
+  participant P as payOS/SePay
+  participant IN as Webhook Inbox
+  U->>API: POST order with idempotency key
+  API->>DB: Create pending order (integer VND)
+  API->>P: Create provider QR/payment link
+  P-->>API: QR/link + reference + expiry
+  API-->>U: pending + QR + amount + account + transfer text
+  U->>P: Bank-app transfer (external)
+  P->>IN: Signed webhook over HTTPS
+  IN->>IN: Verify signature and deduplicate
+  alt authentic event + matched order
+    IN->>DB: Short transaction: status paid + immutable ledger + wallet + outbox
+    DB-->>IN: Commit once
+    IN-->>P: 2xx ACK
+    U->>API: GET order/status
+    API-->>U: paid + updated credits
+  else invalid / mismatch / duplicate
+    IN->>DB: Reject or manual-review / record event
+    IN-->>P: Provider-appropriate ACK or error
+  end

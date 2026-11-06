@@ -1,0 +1,15 @@
+flowchart TD
+  Browser["Next.js browser"] -->|"Cookie and CSRF"| API["FastAPI"]
+  Browser -->|"One-time ticket, PCM"| WS["WS gateway"]
+  API --> DB[("MongoDB replica set")]
+  API --> Redis[("Redis queue and TTL payloads")]
+  WS --> Redis
+  Redis --> Worker["Inference worker"]
+  Worker --> Adapters["ASR, MT, rules, TTS"]
+  Adapters --> Hub["HF Hub cache or local files"]
+  Adapters -.->|"Cloud consent"| Remote["HF Remote"]
+  Worker -->|"Results and metrics"| Redis
+  WS -->|"Owned transcript"| DB
+  API --> PayOS["payOS checkout"]
+  PayOS -->|"Signed webhook"| Billing["Signature and order matching"]
+  Billing -->|"Atomic credit grant"| DB

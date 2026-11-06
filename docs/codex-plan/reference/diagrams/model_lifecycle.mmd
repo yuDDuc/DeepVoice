@@ -1,0 +1,16 @@
+stateDiagram-v2
+  [*] --> unconfigured
+  unconfigured --> validating: ENV role + source + adapter
+  validating --> error: missing token / invalid shape / unsupported format
+  validating --> fetching: source=hf_hub (cache missing)
+  validating --> warming: source=local or cached hf_hub
+  validating --> remote_ready: source=hf_remote and provider task supported
+  validating --> mock_ready: source=mock
+  fetching --> warming: revision pinned / downloaded & cached
+  fetching --> error: network failure / license / disk quota
+  warming --> ready: validated IO + warmup
+  warming --> error: OOM / unsupported GPU / invalid tensor
+  ready --> draining: reload model / shutdown
+  draining --> unconfigured: release resources
+  error --> validating: fix ENV / retry
+  ready --> error: runtime exception

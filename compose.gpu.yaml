@@ -1,0 +1,12 @@
+# NVIDIA Container Toolkit required. This override enables the worker GPU only.
+services:
+  worker:
+    build:
+      dockerfile: Dockerfile.gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

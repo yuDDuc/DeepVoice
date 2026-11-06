@@ -1,0 +1,8 @@
+BẮT ĐẦU TRONG CODEX:
+
+Repo này là dự án AVRT Studio (dịch EN <-> VI realtime).
+1. Đọc đầy đủ: docs/codex-plan/prompts/00_MASTER.md, docs/codex-plan/reference/SYSTEM_REQUIREMENTS.md, docs/codex-plan/reference/ENV_CONTRACT.md và .env.example.
+2. Bắt đầu CHỈ prompt docs/codex-plan/prompts/01_ARCHITECTURE.md.
+3. Tạo tài liệu và Mermaid trước, báo cáo đường dẫn file + kiểm tra đã chạy.
+4. Dừng ở cuối checkpoint 01, không tự nhảy sang checkpoint 02 khi chưa được tôi yêu cầu.
+5. Không hardcode model/shape/nguồn HF/local, không đưa secrets lên FE, không giả lập thanh toán thành công.

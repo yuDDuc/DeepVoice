@@ -1,0 +1,33 @@
+sequenceDiagram
+  autonumber
+  participant U as User/Mic
+  participant FE as Next.js
+  participant WS as WS Gateway
+  participant ASR as ASR Adapter
+  participant MT as MT Adapter
+  participant V as Verifier
+  participant TTS as TTS Adapter
+  participant DB as MongoDB
+  U->>FE: Microphone permission & push-to-talk
+  FE->>WS: Authenticated short-lived WS ticket
+  WS-->>FE: capabilities + negotiated audio format
+  loop each sequenced audio frame
+    FE->>WS: PCM frame (seq, ts, 16kHz)
+    WS->>ASR: VAD + buffered stable chunk
+    ASR-->>WS: partial/stable ASR
+    WS-->>FE: original text partial
+    WS->>MT: translate stable prefix, direction EN/VI
+    MT-->>WS: provisional target
+    WS->>V: check numbers, negation, units, entities
+    alt verification passed and stable
+      V-->>WS: confirmed segment
+      WS-->>FE: confirmed subtitle revision
+      WS->>TTS: only verified confirmed text
+      TTS-->>FE: playable audio chunk
+    else uncertain or failed
+      V-->>WS: warning + hold
+      WS-->>FE: provisional/warning; await context
+    end
+  end
+  WS->>DB: Persist consented session + segments
+  WS-->>FE: metrics snapshot and final status

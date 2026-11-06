@@ -1,0 +1,11 @@
+# ENV CONTRACT — Những gì Codex phải thực thi
+
+- `.env.example` is the full configuration catalog. **Every variable must have a line directly above beginning `#`** with Vietnamese usage + legal values/units + sample default + restart/reload note. Code should parse one Pydantic settings object (or several scoped objects derived from it) and a schema built/validated against env template. Avoid hardcoding hidden defaults that differ from `.env.example`.
+- Values for server secrets, model path and model config must remain server-side. Next.js `NEXT_PUBLIC_*` values are public by definition, so do not put HF_TOKEN/MONGO credentials in them.
+- Source modes: `hf_hub` = download/cache weights then run locally; `hf_remote` = call supported Inference Providers/endpoints; `local` = own model files; `mock` = deterministic test adapter.
+- `*_MODEL_ID` controls HF repo. `*_LOCAL_PATH` controls local model folder under `LOCAL_MODELS_ROOT`. `*_ADAPTER` controls expected model family/format; a custom model may need a dedicated adapter, which must be documented. Input shapes are **declarations to validate**, not commands to physically resize tensors or override architecture. For dynamic sequences use `-1` in JSON shape.
+- Env may be edited/restarted; UI runtime selection is an optional bounded override requiring permissions and audit. Private keys only in `.env`/secret manager. Separate `.env.test` with test credentials only if necessary, ignored by Git.
+- No paid services configured? `PAYMENT_PROVIDER=mock`, `*_SOURCE=mock` work out of box. Turning on real payments/model source without required credentials should cause clear preflight error, not simulated success.
+- Use unique order refs and provider webhook verification. All production payment amounts server-side in integer VND. Google Pay requires supported PSP and eligibility; it is not bank QR.
+- For local GPU Docker Compose, optional GPU override; model on CPU always supported as fallback where compatible. For HF remote CPU/GPU metrics must reflect local resources, remote GPU unavailable.
+- Document config changes that require restart vs can reload (model lifecycle likely needs controlled unload/reload rather than process restart).

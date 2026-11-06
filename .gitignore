@@ -1,26 +1,17 @@
-# Environment and secrets
 .env
 .env.*
 !.env.example
-
-# Model and runtime caches
-.model-cache/
-**/__pycache__/
-*.py[cod]
+node_modules/
+.next/
+.venv/
+__pycache__/
 .pytest_cache/
-
-# Frontend dependencies and build output
-frontend/node_modules/
-frontend/dist/
-frontend/.vite/
-
-# Local tooling and logs
-.vscode/
-*.log
-*.tmp
-*.bak
-
-# OS files
-Thumbs.db
-Desktop.ini
-.DS_Store
+.ruff_cache/
+.tmp/
+*.pyc
+*.tsbuildinfo
+models/cache/
+backend/models/
+models/custom/*
+!models/custom/.gitkeep
+data/

@@ -1,0 +1,143 @@
+%% Logical MongoDB relations: not SQL foreign keys. Codex must verify schema/indexes.
+erDiagram
+  USER ||--o{ REFRESH_SESSION : owns
+  USER ||--o{ CONSENT : grants
+  USER ||--o{ SPEAKER_PROFILE : permits
+  USER ||--o{ TRANSLATION_SESSION : starts
+  USER ||--o{ AUDIT_EVENT : triggers
+  USER ||--o{ SUBSCRIPTION : subscribes
+  USER ||--o{ PAYMENT_ORDER : creates
+  USER ||--|| WALLET_ACCOUNT : owns
+  PLAN ||--o{ SUBSCRIPTION : defines
+  TRANSLATION_SESSION ||--o{ TRANSCRIPT_SEGMENT : contains
+  TRANSLATION_SESSION ||--o{ METRIC_SAMPLE : measures
+  PAYMENT_ORDER ||--o{ PAYMENT_EVENT : notifies
+  PAYMENT_ORDER ||--o{ WEBHOOK_INBOX : correlates
+  PAYMENT_ORDER ||--o{ OUTBOX : schedules
+  PAYMENT_ORDER ||--o| WALLET_LEDGER : credits
+  WALLET_ACCOUNT ||--o{ WALLET_LEDGER : records
+
+  USER {
+    objectId _id PK
+    string email UK
+    string password_hash
+    string role
+    datetime created_at
+  }
+  REFRESH_SESSION {
+    objectId _id PK
+    objectId user_id FK
+    string refresh_hash
+    datetime expires_at
+    datetime revoked_at
+  }
+  CONSENT {
+    objectId _id PK
+    objectId user_id FK
+    string purpose
+    boolean granted
+    datetime updated_at
+  }
+  SPEAKER_PROFILE {
+    objectId _id PK
+    objectId user_id FK
+    string speaker_label
+    string embedding_ref
+    datetime expires_at
+  }
+  TRANSLATION_SESSION {
+    objectId _id PK
+    objectId user_id FK
+    string direction
+    string status
+    datetime started_at
+  }
+  TRANSCRIPT_SEGMENT {
+    objectId _id PK
+    objectId translation_session_id FK
+    int seq
+    int revision
+    string source_text
+    string target_text
+    string confirmation_state
+  }
+  METRIC_SAMPLE {
+    objectId _id PK
+    objectId translation_session_id FK
+    float cpu_percent
+    float gpu_percent
+    float latency_ms
+    datetime observed_at
+  }
+  PLAN {
+    objectId _id PK
+    string code UK
+    int price_vnd
+    int included_credits
+    int version
+  }
+  SUBSCRIPTION {
+    objectId _id PK
+    objectId user_id FK
+    objectId plan_id FK
+    string status
+    datetime renew_at
+  }
+  PAYMENT_ORDER {
+    objectId _id PK
+    objectId user_id FK
+    string idempotency_key UK
+    string provider
+    int amount_vnd
+    string status
+    datetime expires_at
+  }
+  PAYMENT_EVENT {
+    objectId _id PK
+    objectId payment_order_id FK
+    string provider_event_id UK
+    string event_type
+    datetime received_at
+  }
+  WEBHOOK_INBOX {
+    objectId _id PK
+    objectId payment_order_id FK
+    string dedupe_key UK
+    string verification_status
+    datetime received_at
+  }
+  WALLET_ACCOUNT {
+    objectId _id PK
+    objectId user_id UK
+    int balance_credits
+    int version
+  }
+  WALLET_LEDGER {
+    objectId _id PK
+    objectId wallet_account_id FK
+    objectId payment_order_id FK
+    string entry_key UK
+    int credit_delta
+    datetime created_at
+  }
+  AUDIT_EVENT {
+    objectId _id PK
+    objectId actor_user_id FK
+    string action
+    datetime created_at
+  }
+  OUTBOX {
+    objectId _id PK
+    objectId payment_order_id FK
+    string event_type
+    string state
+    datetime created_at
+  }
+  MODEL_REGISTRY {
+    objectId _id PK
+    string role UK
+    string provider
+    string model_id
+    string model_revision
+    string status
+  }
