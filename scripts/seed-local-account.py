@@ -28,28 +28,36 @@ def main():
     email = "test@avrt.local"
     store = make_store(settings)
     try:
-        if store.find("users", email=email):
-            print(f"Test account already exists: {email}")
+        credentials = Path(settings.sqlite_path).parent / "test-login.txt"
+        existing = store.find("users", email=email)
+        if existing and credentials.is_file():
+            print(f"Test account already exists: {email}. Credentials: {credentials}")
             return
         password = secrets.token_urlsafe(15)
-        store.add_user(
-            {
-                "id": uuid4().hex,
-                "email": email,
-                "password_hash": PasswordHasher().hash(password),
-                "role": "user",
-                "credits": 0,
-                "created_at": datetime.now(UTC),
-                "consent_history": True,
-                "consent_cloud": False,
-            }
-        )
-        credentials = Path(settings.sqlite_path).parent / "test-login.txt"
+        if existing:
+            user = existing[0]
+            user["password_hash"] = PasswordHasher().hash(password)
+            store.put("users", user)
+            action = "Reset"
+        else:
+            store.add_user(
+                {
+                    "id": uuid4().hex,
+                    "email": email,
+                    "password_hash": PasswordHasher().hash(password),
+                    "role": "user",
+                    "credits": 0,
+                    "created_at": datetime.now(UTC),
+                    "consent_history": True,
+                    "consent_cloud": False,
+                }
+            )
+            action = "Created"
         credentials.write_text(
             f"Local AVRT test login\nEmail: {email}\nPassword: {password}\n",
             encoding="utf-8",
         )
-        print(f"Created test account. Credentials: {credentials}")
+        print(f"{action} test account. Credentials: {credentials}")
     finally:
         store.close()
 
